@@ -4,139 +4,81 @@ import re
 import urllib.parse
 from collections import defaultdict
 from datetime import datetime
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import streamlit as st
 from dotenv import load_dotenv
 
 from llm import GroqClient
 from memory import (
+    DEFAULT_HINDSIGHT_BASE_URL,
     DEMO_DATA,
     check_hindsight_connection,
     count_pending_promises,
     create_store_from_env,
     memories_to_text,
+    memory_chat_context_text,
     memory_fingerprint,
     normalize_investor_name,
 )
 from prompts import (
+    MEMORY_CHAT_SYSTEM,
     PREP_SECTION_HEADERS,
     build_email_prompt,
+    build_memory_chat_user_prompt,
     build_prepare_meeting_prompt,
 )
-
+from theme_css import DARK_PRO_THEME_CSS as FF_GLOBAL_CSS, FF_GOOGLE_FONTS
 
 load_dotenv()
 
-st.set_page_config(page_title="FounderFlow AI", page_icon="🚀", layout="wide")
 
-st.markdown(
-    """
-    <style>
-        .main .block-container {
-            padding-top: 1.35rem;
-            padding-bottom: 2.75rem;
-            max-width: 1120px;
-        }
-        .ff-hero {
-            margin-bottom: 0.35rem;
-        }
-        .app-subtitle {
-            color: var(--gray-70, #94a3b8);
-            margin-top: -6px;
-            margin-bottom: 1.35rem;
-            font-size: 1.12rem;
-            font-weight: 500;
-        }
-        .dash-panel {
-            border: 1px solid rgba(148, 163, 184, 0.28);
-            border-radius: 16px;
-            padding: 1.1rem 1.25rem 1.25rem 1.25rem;
-            margin-bottom: 1.15rem;
-            background: var(--secondary-background-color, rgba(99, 102, 241, 0.06));
-        }
-        .insights-panel {
-            border: 1px solid rgba(148, 163, 184, 0.28);
-            border-radius: 16px;
-            padding: 1rem 1.2rem;
-            margin: 1rem 0 1.2rem 0;
-            background: linear-gradient(
-                135deg,
-                rgba(99, 102, 241, 0.08) 0%,
-                rgba(14, 165, 233, 0.06) 100%
-            );
-        }
-        .insights-panel h4 {
-            margin: 0 0 0.65rem 0;
-            font-size: 1.05rem;
-        }
-        .memory-card {
-            border: 1px solid rgba(148, 163, 184, 0.35);
-            border-radius: 14px;
-            padding: 1rem 1.1rem;
-            margin-bottom: 0.65rem;
-            background-color: var(--secondary-background-color, rgba(128, 128, 128, 0.08));
-            box-shadow: none;
-        }
-        .prep-section-card {
-            border: 1px solid rgba(148, 163, 184, 0.3);
-            border-radius: 14px;
-            padding: 1rem 1.15rem;
-            margin-bottom: 0.75rem;
-            background: var(--secondary-background-color, rgba(128, 128, 128, 0.06));
-        }
-        .timeline-rail {
-            border-left: 3px solid rgba(99, 102, 241, 0.55);
-            margin-left: 10px;
-            padding-left: 1.15rem;
-        }
-        .timeline-dot {
-            width: 11px;
-            height: 11px;
-            border-radius: 50%;
-            background: #6366f1;
-            margin-left: -19px;
-            margin-top: 6px;
-            float: left;
-        }
-        .investor-group-title {
-            font-size: 1.05rem;
-            font-weight: 700;
-            color: var(--text-color, #0f172a);
-            margin: 1.25rem 0 0.5rem 0;
-        }
-        .small-muted {
-            color: var(--gray-70, #94a3b8);
-            font-size: 0.9rem;
-        }
-        div[data-testid="stExpander"] details {
-            border-radius: 12px;
-            border: 1px solid rgba(148, 163, 184, 0.28);
-            background: transparent !important;
-        }
-        div[data-testid="stExpander"] summary {
-            color: var(--text-color);
-        }
-        h3 { letter-spacing: -0.02em; }
-        [data-testid="stMetric"] {
-            background: var(--secondary-background-color, rgba(0,0,0,0.04));
-            border: 1px solid rgba(148, 163, 184, 0.22);
-            border-radius: 12px;
-            padding: 0.65rem 0.75rem;
-        }
-    </style>
-    """,
-    unsafe_allow_html=True,
+def _streamlit_cloud_secrets_to_env() -> None:
+    """Streamlit Community Cloud / Docker: map st.secrets into os.environ for Groq + Hindsight."""
+    try:
+        sec = getattr(st, "secrets", None)
+        if sec is None:
+            return
+        for k in ("GROQ_API_KEY", "HINDSIGHT_API_KEY", "HINDSIGHT_BASE_URL"):
+            try:
+                if k not in sec:
+                    continue
+                if (os.environ.get(k) or "").strip():
+                    continue
+                val = str(sec[k]).strip()
+                if val:
+                    os.environ[k] = val
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+
+st.set_page_config(
+    page_title="FounderFlow AI",
+    page_icon=None,
+    layout="wide",
+    initial_sidebar_state="expanded",
 )
 
-st.title("🚀 FounderFlow AI")
-st.markdown(
-    '<div class="app-subtitle">Memory-Powered Founder OS · Built for founders who close rounds</div>',
-    unsafe_allow_html=True,
-)
+_streamlit_cloud_secrets_to_env()
 
 memory_store = create_store_from_env()
 llm_client = GroqClient()
+
+st.markdown(
+    f'<link rel="stylesheet" href="{FF_GOOGLE_FONTS}">',
+    unsafe_allow_html=True,
+)
+st.markdown(f"<style>{FF_GLOBAL_CSS}</style>", unsafe_allow_html=True)
+
+st.markdown(
+    '<div class="ff-pro-band">'
+    "<span>Investor relations workspace</span>"
+    "<span>Structured memory · Brief generation</span>"
+    "</div>",
+    unsafe_allow_html=True,
+)
 
 if "prepare_investor" not in st.session_state:
     st.session_state.prepare_investor = ""
@@ -148,18 +90,123 @@ if "email_draft" not in st.session_state:
     st.session_state.email_draft = ""
 if "judge_banner" not in st.session_state:
     st.session_state.judge_banner = ""
+if "add_form_investor" not in st.session_state:
+    st.session_state.add_form_investor = ""
+if "add_form_notes" not in st.session_state:
+    st.session_state.add_form_notes = ""
+if "add_form_objections" not in st.session_state:
+    st.session_state.add_form_objections = ""
+if "add_form_promises" not in st.session_state:
+    st.session_state.add_form_promises = ""
+if "demo_fill_idx" not in st.session_state:
+    st.session_state.demo_fill_idx = 0
+if "chat_messages" not in st.session_state:
+    st.session_state.chat_messages = []
+if "_memory_chat_pending" not in st.session_state:
+    st.session_state._memory_chat_pending = False
+if "save_meeting_flash" not in st.session_state:
+    st.session_state.save_meeting_flash = None
+if "clear_add_form_after_save" not in st.session_state:
+    st.session_state.clear_add_form_after_save = False
+if "show_memory_compare" not in st.session_state:
+    st.session_state.show_memory_compare = False
+if "ff_nav_page" not in st.session_state:
+    st.session_state.ff_nav_page = "overview"
+if "ff_dashboard_flash" not in st.session_state:
+    st.session_state.ff_dashboard_flash = None
 
 
 @st.cache_data(ttl=90)
-def _cached_hindsight_live(api_key: str) -> bool:
-    return check_hindsight_connection(api_key)
+def _cached_hindsight_live(api_key: str, base_url: str) -> bool:
+    return check_hindsight_connection(api_key, base_url)
 
 
-def _hindsight_status_label() -> str:
+def _hindsight_status_label(*, compact: bool = False) -> str:
     key = os.getenv("HINDSIGHT_API_KEY", "").strip()
     if not key:
-        return "Local Fallback"
-    return "Connected" if _cached_hindsight_live(key) else "Local Fallback"
+        return "Local" if compact else "Local only"
+    base = os.getenv("HINDSIGHT_BASE_URL", "").strip() or DEFAULT_HINDSIGHT_BASE_URL
+    ok = _cached_hindsight_live(key, base)
+    if compact:
+        return "OK" if ok else "Offline"
+    return "Hindsight live" if ok else "Hindsight unreachable"
+
+
+def _hindsight_metric_help() -> str:
+    key = os.getenv("HINDSIGHT_API_KEY", "").strip()
+    if not key:
+        return "No HINDSIGHT_API_KEY — data stays in memory_store.json only."
+    base = os.getenv("HINDSIGHT_BASE_URL", "").strip() or DEFAULT_HINDSIGHT_BASE_URL
+    if _cached_hindsight_live(key, base):
+        return f"API reachable at {base} — saves sync to cloud; lists merge remote rows."
+    return f"Key set but API check failed — verify key, URL ({base}), and network."
+
+
+def _parse_record_instant(created_at: Optional[str], meeting_date: Optional[str]) -> datetime:
+    if created_at:
+        raw = str(created_at).strip()
+        try:
+            return datetime.fromisoformat(raw)
+        except ValueError:
+            pass
+    d = (meeting_date or "").strip()
+    try:
+        return datetime.strptime(d, "%Y-%m-%d")
+    except ValueError:
+        return datetime.now()
+
+
+def format_relative_logged_ago(created_at: Optional[str], meeting_date: Optional[str]) -> str:
+    """Human-readable time since this memory row was logged (professional copy)."""
+    t = _parse_record_instant(created_at, meeting_date)
+    delta = datetime.now() - t
+    sec = max(0, int(delta.total_seconds()))
+    if sec < 45:
+        return "just now"
+    if sec < 90:
+        return "1 minute ago"
+    mins = sec // 60
+    if mins < 60:
+        return "1 minute ago" if mins == 1 else f"{mins} minutes ago"
+    hrs = mins // 60
+    if hrs < 24:
+        return "1 hour ago" if hrs == 1 else f"{hrs} hours ago"
+    days = hrs // 24
+    if days < 14:
+        return "1 day ago" if days == 1 else f"{days} days ago"
+    weeks = days // 7
+    if weeks < 8:
+        return "1 week ago" if weeks == 1 else f"{weeks} weeks ago"
+    mons = days // 30
+    if mons < 12:
+        return "1 month ago" if mons == 1 else f"{mons} months ago"
+    yrs = days // 365
+    return "1 year ago" if yrs == 1 else f"{yrs} years ago"
+
+
+def _memory_meta_row_html(item: Dict) -> str:
+    meeting = html.escape(str(item.get("date") or "—"))
+    ago = html.escape(format_relative_logged_ago(item.get("created_at"), item.get("date")))
+    return (
+        '<div class="ff-meta-row">'
+        f"<strong>Meeting date</strong> {meeting}"
+        f"<span class='ff-meta-sep'>|</span>"
+        f"<strong>Logged</strong> {ago}"
+        "</div>"
+    )
+
+
+def _apply_demo_row_to_add_form(row: Dict) -> None:
+    """Pre-fill Add Meeting fields from a demo record (user can edit, then Save)."""
+    st.session_state.add_form_investor = str(row.get("investor_name", ""))
+    st.session_state.add_form_notes = str(row.get("notes", ""))
+    st.session_state.add_form_objections = str(row.get("objections", "") or "")
+    st.session_state.add_form_promises = str(row.get("promises", "") or "")
+
+
+def _memory_dump_for_chat() -> str:
+    """Structured dump for chatbot-style Q&A (timeline + per-investor newest-first)."""
+    return memory_chat_context_text(memory_store.list_all())
 
 
 def parse_email_subject_body(email_text: str) -> Tuple[str, str]:
@@ -202,6 +249,26 @@ def parse_prep_sections(text: str) -> Dict[str, str]:
     return result
 
 
+def _html_multiline(value: object) -> str:
+    return html.escape(str(value or "")).replace("\n", "<br/>")
+
+
+def _insight_line_to_html(line: str) -> str:
+    """Convert a single-line insight with **bold** spans to safe HTML."""
+    out: List[str] = []
+    rest = line
+    while rest:
+        m = re.search(r"\*\*(.+?)\*\*", rest)
+        if not m:
+            out.append(html.escape(rest))
+            break
+        if m.start() > 0:
+            out.append(html.escape(rest[: m.start()]))
+        out.append("<strong>" + html.escape(m.group(1)) + "</strong>")
+        rest = rest[m.end() :]
+    return "".join(out)
+
+
 def _render_prep_cards(text: str, fallback_text: str) -> None:
     parsed = parse_prep_sections(text)
     if len(parsed) < 3:
@@ -228,17 +295,16 @@ def _render_timeline_newest_first(memories: List[Dict]) -> None:
         key=lambda x: x.get("date", ""),
         reverse=True,
     )
-    for m in ordered:
+    for i, m in enumerate(ordered):
         notes = m.get("notes", "") or "—"
         obj = m.get("objections", "") or "—"
         prom = m.get("promises", "") or "—"
         st.markdown(
-            f'<div class="memory-card" style="border-left: 4px solid #6366f1;">'
-            f"<strong>📍 {m.get('date', '—')}</strong>"
-            f"<span class='small-muted'> · Meeting</span><br><br>"
-            f"<b>Notes:</b> {notes}<br>"
-            f"<b>Concerns:</b> {obj}<br>"
-            f"<b>Promises:</b> {prom}"
+            f'<div class="memory-card ff-memory-pin ff-timeline-card ff-stagger-{i % 6}">'
+            f"{_memory_meta_row_html(m)}"
+            f"<b>Notes:</b> {_html_multiline(notes)}<br>"
+            f"<b>Concerns:</b> {_html_multiline(obj)}<br>"
+            f"<b>Promises:</b> {_html_multiline(prom)}"
             f"</div>",
             unsafe_allow_html=True,
         )
@@ -263,11 +329,11 @@ def _founder_insights(rows: List[Dict]) -> List[str]:
                 break
     if len(rahul) >= 2 and eff_hits >= 1:
         insights.append(
-            "📊 **Rahul Mehta** repeatedly presses **efficiency metrics** (CAC, burn)—lead with crisp numbers."
+            "**Rahul Mehta** repeatedly presses **efficiency metrics** (CAC, burn)—lead with crisp numbers."
         )
     elif rahul and eff_hits:
         insights.append(
-            "📊 **Rahul Mehta** is focused on **efficiency and unit economics** in your narrative."
+            "**Rahul Mehta** is focused on **efficiency and unit economics** in your narrative."
         )
 
     priya = by_name.get("Priya Sharma", [])
@@ -276,17 +342,17 @@ def _founder_insights(rows: List[Dict]) -> List[str]:
     ).lower()
     if "revenue" in priya_blob or "predictability" in priya_blob:
         insights.append(
-            "📈 **Priya Sharma** cares about **revenue predictability** and **GTM depth**—tie partnerships to pipeline."
+            "**Priya Sharma** cares about **revenue predictability** and **GTM depth**—tie partnerships to pipeline."
         )
 
     pending = count_pending_promises(rows)
     if pending >= 3:
         insights.append(
-            f"✅ **{pending} logged follow-ups** still have promises attached—close the loop before the next call."
+            f"**{pending} logged follow-ups** still have promises attached—close the loop before the next call."
         )
     elif pending:
         insights.append(
-            f"✅ **{pending} meeting(s)** include open promises—review before you pitch again."
+            f"**{pending} meeting(s)** include open promises—review before you pitch again."
         )
 
     ret_n = sum(
@@ -296,16 +362,16 @@ def _founder_insights(rows: List[Dict]) -> List[str]:
     )
     if ret_n >= 2:
         insights.append(
-            "🔁 **Retention** shows up multiple times—prepare cohort charts and a clear story."
+            "**Retention** shows up multiple times—prepare cohort charts and a clear story."
         )
     elif ret_n == 1:
         insights.append(
-            "🔁 **Retention** has surfaced—have one sharp proof point ready."
+            "**Retention** has surfaced—have one sharp proof point ready."
         )
 
     if not insights:
         insights.append(
-            "💡 Patterns will appear as you add objections, promises, and richer notes."
+            "Patterns will appear as you add objections, promises, and richer notes."
         )
     return insights
 
@@ -338,36 +404,35 @@ def _render_memory_cards_grouped(memories: List[Dict]) -> None:
         n_meet = len(items)
         label = f"{n_meet} meeting" if n_meet == 1 else f"{n_meet} meetings"
         st.markdown(
-            f'<div class="investor-group-title">{name} ({label})</div>',
+            "<div class='investor-group-title ff-anim-rise'>"
+            f"{html.escape(name)} ({html.escape(label)})"
+            "</div>",
             unsafe_allow_html=True,
         )
+        pin_l, pin_r = st.columns(2)
         for idx, item in enumerate(items):
             fp = memory_fingerprint(item)
             row_key = f"{name}_{idx}_{fp}"
-            c_body, c_del = st.columns([4.2, 1])
-            with c_body:
+            col = pin_l if idx % 2 == 0 else pin_r
+            with col:
                 st.markdown(
-                    (
-                        '<div class="memory-card">'
-                        f"<span class='small-muted'>{item.get('date', 'unknown')}</span><br><br>"
-                        f"<b>Notes:</b> {item.get('notes', '')}<br>"
-                        f"<b>Objections:</b> {item.get('objections', '')}<br>"
-                        f"<b>Promises:</b> {item.get('promises', '')}"
-                        "</div>"
-                    ),
+                    f'<div class="memory-card ff-memory-pin ff-stagger-{idx % 6}">'
+                    f"{_memory_meta_row_html(item)}"
+                    f"<b>Notes:</b> {_html_multiline(item.get('notes', ''))}<br>"
+                    f"<b>Objections:</b> {_html_multiline(item.get('objections', ''))}<br>"
+                    f"<b>Promises:</b> {_html_multiline(item.get('promises', ''))}"
+                    "</div>",
                     unsafe_allow_html=True,
                 )
-            with c_del:
-                st.write("")
                 if st.button(
-                    "Delete",
+                    "Remove from store",
                     key=f"del_mem_{row_key}",
                     type="secondary",
                     use_container_width=True,
                 ):
                     memory_store.delete_memory(item)
                     if hasattr(st, "toast"):
-                        st.toast("Memory removed.", icon="🗑️")
+                        st.toast("Memory removed.")
                     st.rerun()
 
 
@@ -425,135 +490,377 @@ def _fallback_prepare(memories: List[Dict], investor_name: str) -> str:
     )
 
 
+def _consume_dashboard_flash() -> None:
+    flash = st.session_state.get("ff_dashboard_flash")
+    if not flash:
+        return
+    st.session_state.ff_dashboard_flash = None
+    kind, msg = flash
+    if kind == "success":
+        st.success(msg)
+    elif kind == "info":
+        st.info(msg)
+    elif kind == "error":
+        st.error(msg)
+
+
 all_memories = memory_store.list_all()
 unique_investors = len(
     {m.get("investor_name") for m in all_memories if m.get("investor_name")}
 )
 pending_n = count_pending_promises(all_memories)
 
-st.caption("Founder dashboard")
-d1, d2, d3, d4 = st.columns(4)
-with d1:
-    st.metric("📚 Total Memories", len(all_memories))
-with d2:
-    st.metric("👤 Unique Investors", unique_investors)
-with d3:
-    st.metric("📌 Pending Promises", pending_n)
-with d4:
-    st.metric("☁️ Memory Status", _hindsight_status_label())
-
-r1, r2, r3, r4 = st.columns(4)
-with r1:
-    if st.button("🚀 Run Judge Demo", use_container_width=True, type="primary"):
+with st.sidebar:
+    st.markdown(
+        '<p class="ff-sidebar-brand">FounderFlow</p>'
+        '<p class="ff-sidebar-tag">Investor memory workspace</p>',
+        unsafe_allow_html=True,
+    )
+    nav = st.session_state.ff_nav_page
+    st.caption("Pages")
+    if st.button(
+        "Overview",
+        use_container_width=True,
+        type="primary" if nav == "overview" else "secondary",
+    ):
+        st.session_state.ff_nav_page = "overview"
+        st.rerun()
+    if st.button(
+        "Add meeting",
+        use_container_width=True,
+        type="primary" if nav == "add" else "secondary",
+    ):
+        st.session_state.ff_nav_page = "add"
+        st.rerun()
+    if st.button(
+        "Prepare meeting",
+        use_container_width=True,
+        type="primary" if nav == "prepare" else "secondary",
+    ):
+        st.session_state.ff_nav_page = "prepare"
+        st.rerun()
+    if st.button(
+        "Generate email",
+        use_container_width=True,
+        type="primary" if nav == "email" else "secondary",
+    ):
+        st.session_state.ff_nav_page = "email"
+        st.rerun()
+    if st.button(
+        "Memory chat",
+        use_container_width=True,
+        type="primary" if nav == "chat" else "secondary",
+    ):
+        st.session_state.ff_nav_page = "chat"
+        st.rerun()
+    st.divider()
+    st.caption("Store & demo")
+    if st.button("Run judge demo", use_container_width=True):
         memory_store.replace_all(DEMO_DATA)
         st.session_state.prepare_investor = "Rahul Mehta"
         st.session_state.judge_banner = (
-            "Demo ready. Use Rahul Mehta in Prepare Meeting."
+            "Demo ready. Use Rahul Mehta in Prepare meeting (left menu)."
         )
         st.session_state.email_draft = ""
+        st.session_state.demo_fill_idx = 0
+        st.session_state.clear_add_form_after_save = True
+        st.session_state.ff_nav_page = "prepare"
         st.rerun()
-with r2:
-    if st.button("Load Demo Data", use_container_width=True):
+    if st.button("Load demo data", use_container_width=True):
         n = memory_store.append_demo_records(DEMO_DATA)
         if n:
-            st.success(f"Added {n} new demo meeting(s) (duplicates skipped).")
+            st.session_state.ff_dashboard_flash = (
+                "success",
+                f"Added {n} demo meeting(s) to the store. Open Add meeting and use Load next sample into form if you want the capture fields filled.",
+            )
         else:
-            st.info("All demo meetings already in memory.")
+            st.session_state.ff_dashboard_flash = (
+                "info",
+                "All demo rows are already in memory. Use Add meeting → Load next sample into form, or Reset demo store for a clean canonical set.",
+            )
         st.rerun()
-with r3:
-    if st.button("Reset All Demo Data", use_container_width=True):
+    if st.button("Reset demo store", use_container_width=True):
         memory_store.replace_all(DEMO_DATA)
         st.session_state.email_draft = ""
-        st.success("Memory replaced with full demo timeline.")
+        st.session_state.demo_fill_idx = 0
+        st.session_state.clear_add_form_after_save = True
+        st.session_state.ff_dashboard_flash = (
+            "success",
+            f"Store reset to {len(DEMO_DATA)} demo rows. Add meeting form clears on next visit to that page.",
+        )
         st.rerun()
-with r4:
-    if st.button("Clear All Memories", use_container_width=True):
+    if st.button("Clear all memories", use_container_width=True):
         memory_store.clear_all()
         st.session_state.email_draft = ""
-        st.success("All local memories cleared.")
+        st.session_state.demo_fill_idx = 0
+        st.session_state.clear_add_form_after_save = True
+        st.session_state.ff_dashboard_flash = ("success", "All local memories cleared.")
         st.rerun()
+    if st.button(
+        "Memory off / on",
+        key="ff_memory_compare_toggle",
+        use_container_width=True,
+        help="Compare behavior without a meeting store vs with stored rows.",
+    ):
+        st.session_state.show_memory_compare = not st.session_state.show_memory_compare
+        st.rerun()
+
+    st.divider()
+    st.caption("Hindsight cloud")
+    hs_key = os.getenv("HINDSIGHT_API_KEY", "").strip()
+    hs_base = os.getenv("HINDSIGHT_BASE_URL", "").strip() or DEFAULT_HINDSIGHT_BASE_URL
+    if hs_key:
+        st.caption("Saves push to Hindsight; Overview & chat merge cloud rows in memory.")
+        if st.button(
+            "Pull Hindsight → local file",
+            key="ff_hs_merge",
+            use_container_width=True,
+            help="GET up to 500 memories from the API and append rows missing from memory_store.json.",
+        ):
+            added, detail = memory_store.merge_hindsight_into_local()
+            if added > 0:
+                st.session_state.ff_dashboard_flash = (
+                    "success",
+                    f"Merged {added} meeting row(s) from Hindsight into your local JSON.",
+                )
+            else:
+                st.session_state.ff_dashboard_flash = ("info", detail)
+            st.rerun()
+        with st.expander("Hindsight endpoint"):
+            st.markdown(
+                f"Requests use **`{hs_base}`** with your API key. "
+                "Override the URL with **`HINDSIGHT_BASE_URL`** in `.env` if your project uses a different host."
+            )
+    else:
+        st.caption(
+            "Add **`HINDSIGHT_API_KEY`** (and optional **`HINDSIGHT_BASE_URL`**) in `.env`, then restart, to sync with Hindsight."
+        )
+
+_consume_dashboard_flash()
 
 if st.session_state.judge_banner:
     st.success(st.session_state.judge_banner)
     st.caption(
-        "Next: open **🎯 Prepare Meeting** → **Prepare Meeting Brief** (Rahul is pre-filled)."
+        "Next: open Prepare meeting from the left menu, then Prepare Meeting Brief (Rahul Mehta is pre-filled)."
     )
     st.session_state.judge_banner = ""
 
-insight_lines = _founder_insights(all_memories)
-st.markdown("#### ✨ AI Founder Insights")
-for line in insight_lines:
-    st.markdown(f"- {line}")
-st.markdown("")
+page = st.session_state.ff_nav_page
 
-with st.expander("Why Memory Wins"):
+if page == "overview":
+    st.subheader("Executive overview")
+    d1, d2, d3, d4 = st.columns(4)
+    with d1:
+        st.metric("Total memories", len(all_memories))
+    with d2:
+        st.metric("Unique investors", unique_investors)
+    with d3:
+        st.metric("Open promise items", pending_n)
+    with d4:
+        st.metric(
+            "Hindsight",
+            _hindsight_status_label(compact=True),
+            help=_hindsight_metric_help(),
+        )
+
+    st.caption(
+        "Memory off / on (left sidebar): compare generic LLM output vs FounderFlow using your current store. "
+        "Reset demo store replaces the file with exactly "
+        f"{len(DEMO_DATA)} rows—if totals grow right after reset, it is usually an extra Save from Add meeting."
+    )
+
+    if st.session_state.show_memory_compare:
+        n_store = len(all_memories)
+        hs_label = _hindsight_status_label()
+        store_status = (
+            f"**Right now:** {n_store} row(s) in the local store. "
+            f"Hindsight / cloud sync: **{hs_label}** (keys in `.env`). "
+            "While rows exist, **memory is on** for this session."
+            if n_store
+            else "**Right now:** the store is **empty**—load demo data or add a meeting so **memory on** uses real rows."
+        )
+        st.markdown("#### What changes with durable memory")
+        st.markdown(store_status)
+        off_c, on_c = st.columns(2)
+        with off_c:
+            st.markdown("##### Without durable memory")
+            st.markdown(
+                """
+**What happens**
+
+- **Prepare meeting** and **Generate email** only see text you paste in the same browser session—or the model guesses from the investor name alone.
+- **No audit trail**: prior objections, promises, and meeting sequence are not tied to your last real call.
+- **Memory chat** has nothing authoritative to quote; answers drift toward generic VC talk.
+
+**User experience**
+
+- You re-type context every time.
+- Follow-ups can miss commitments you already made (“I’ll send the retention view”) because they were never stored.
+                """.strip(),
+            )
+        with on_c:
+            st.markdown("##### With memory on (FounderFlow)")
+            st.markdown(
+                """
+**What happens**
+
+- **Prepare meeting** builds a brief from **saved rows** for that investor (notes, objections, promises, dates).
+- **Generate email** uses the **same** store so tone and facts line up with what was logged.
+- **Memory chat** reads a structured export (timeline + per-investor “#1 = most recent”) so you can ask for “last three meetings with Rahul” and get grounded answers.
+
+**User experience**
+
+- One place to log what was said; prep and outbound stay aligned with that history.
+- Optional **Hindsight** upload when configured—local JSON always works as the source of truth on disk.
+                """.strip(),
+            )
+
+    insight_lines = _founder_insights(all_memories)
     st.markdown(
-        """
+        '<p class="ff-insight-board-title">AI founder insights</p>',
+        unsafe_allow_html=True,
+    )
+    if insight_lines:
+        ins_l, ins_r = st.columns(2)
+        for i, line in enumerate(insight_lines):
+            inner = _insight_line_to_html(line)
+            col = ins_l if i % 2 == 0 else ins_r
+            with col:
+                st.markdown(
+                    f'<div class="ff-insight-pin ff-stagger-{i % 6}">'
+                    f'<div class="ff-insight-body">'
+                    f'<span class="ff-bullet">•</span>{inner}'
+                    f"</div></div>",
+                    unsafe_allow_html=True,
+                )
+    st.markdown("")
+
+    with st.expander("Why Memory Wins"):
+        st.markdown(
+            """
 **Without Memory:**  
 "Pitch confidently."
 
 **With FounderFlow:**  
 "Rahul asked CAC twice and still awaits your retention dashboard."
-        """
-    )
+            """
+        )
 
-with st.expander("Why persistent memory matters"):
-    st.markdown(
-        """
+    with st.expander("Why persistent memory matters"):
+        st.markdown(
+            """
 **Without chat memory:** each LLM session forgets your investors and promises.
 
 **With FounderFlow:** notes, objections, and tasks stay in **durable memory** (local + Hindsight when connected)—prep and email pull the **same** relationship context every time.
-        """
-    )
+            """
+        )
 
-tab_add, tab_prepare, tab_email = st.tabs(
-    ["📝 Add Meeting", "🎯 Prepare Meeting", "✉️ Generate Email"]
-)
+elif page == "add":
+    if st.session_state.clear_add_form_after_save:
+        st.session_state.add_form_investor = ""
+        st.session_state.add_form_notes = ""
+        st.session_state.add_form_objections = ""
+        st.session_state.add_form_promises = ""
+        st.session_state.clear_add_form_after_save = False
 
-with tab_add:
     st.subheader("Add Investor Meeting Memory")
+    if st.session_state.save_meeting_flash:
+        st.success(st.session_state.save_meeting_flash)
+        st.session_state.save_meeting_flash = None
     before_count = len(memory_store.list_all())
     st.caption(f"Memories before save: {before_count}")
+    st.caption(
+        "**Load next sample into form** pulls one demo row into these fields. "
+        "**Load demo data** (left sidebar) only fills the memory store—fields stay empty until you load a sample here or type your own notes, then **Save Memory**."
+    )
 
-    with st.form("add_meeting_form", clear_on_submit=True):
-        investor_name = st.text_input("Investor Name", placeholder="Rahul Mehta")
-        notes = st.text_area(
-            "Meeting Notes", placeholder="Asked CAC and growth metrics..."
+    sf1, sf2 = st.columns(2)
+    with sf1:
+        if st.button("Load next sample into form", use_container_width=True):
+            idx = st.session_state.demo_fill_idx % len(DEMO_DATA)
+            _apply_demo_row_to_add_form(DEMO_DATA[idx])
+            st.session_state.demo_fill_idx = idx + 1
+            st.success("Form filled from demo—switch fields as needed, then Save.")
+            st.rerun()
+    with sf2:
+        if st.button("Clear form fields", use_container_width=True):
+            st.session_state.add_form_investor = ""
+            st.session_state.add_form_notes = ""
+            st.session_state.add_form_objections = ""
+            st.session_state.add_form_promises = ""
+            st.rerun()
+
+    # Not using st.form: form widgets defer session_state updates until submit, which breaks
+    # programmatic fills from "Load demo data" / "Load next sample" (same keys, no submit).
+    with st.container(border=True):
+        st.markdown(
+            '<div class="ff-meeting-head">'
+            '<p class="ff-meeting-head-title">Meeting capture</p>'
+            '<span class="ff-meeting-ready">'
+            '<span class="ff-meeting-ready-dot" aria-hidden="true"></span>Ready'
+            "</span></div>",
+            unsafe_allow_html=True,
         )
-        objections = st.text_area("Objections", placeholder="High CAC concerns...")
-        promises = st.text_area(
-            "Promises / Tasks", placeholder="Send updated pitch deck..."
+        st.text_input(
+            "Investor Name",
+            placeholder="e.g. Rahul Mehta (empty until you load a sample or type)",
+            key="add_form_investor",
         )
-        submitted = st.form_submit_button("Save Memory")
+        st.text_area(
+            "Meeting Notes",
+            placeholder="Use Load next sample or Load demo data to fill, or type your own…",
+            key="add_form_notes",
+            height=100,
+        )
+        st.text_area(
+            "Objections",
+            placeholder="Objections / concerns (optional)",
+            key="add_form_objections",
+            height=80,
+        )
+        st.text_area(
+            "Promises / Tasks",
+            placeholder="Follow-ups you committed to (optional)",
+            key="add_form_promises",
+            height=80,
+        )
+        submitted = st.button("Save Memory", type="primary", use_container_width=True)
 
     if submitted:
-        if not investor_name.strip() or not notes.strip():
+        inv = st.session_state.add_form_investor.strip()
+        nt = st.session_state.add_form_notes.strip()
+        ob = st.session_state.add_form_objections.strip()
+        pr = st.session_state.add_form_promises.strip()
+        if not inv or not nt:
             st.error("Investor Name and Meeting Notes are required.")
         else:
             record = {
-                "investor_name": investor_name.strip(),
-                "notes": notes.strip(),
-                "objections": objections.strip(),
-                "promises": promises.strip(),
+                "investor_name": inv,
+                "notes": nt,
+                "objections": ob,
+                "promises": pr,
                 "date": datetime.now().strftime("%Y-%m-%d"),
+                "created_at": datetime.now().isoformat(timespec="seconds"),
             }
             result = memory_store.save_memory(record)
             after_count = len(memory_store.list_all())
-            st.success(
-                "✅ Memory saved successfully and available for future investor prep."
-            )
-            st.caption(f"Memories after save: {after_count}")
-            st.write(
-                {
-                    "local_saved": result["local_saved"],
-                    "hindsight_saved": result["hindsight_saved"],
-                }
-            )
+            if result.get("duplicate"):
+                st.session_state.save_meeting_flash = (
+                    "That meeting is **already in memory** (same investor, date, notes, objections, promises). "
+                    "Nothing was added—edit the form or change the date if you meant a new meeting."
+                )
+            else:
+                st.session_state.clear_add_form_after_save = True
+                st.session_state.save_meeting_flash = (
+                    f"Memory saved ({after_count} total). "
+                    f"Hindsight: {'ok' if result['hindsight_saved'] else 'local only'}."
+                )
+            st.rerun()
 
     st.markdown("### Current Memory Store")
     _render_memory_cards_grouped(memory_store.list_all())
 
-with tab_prepare:
+elif page == "prepare":
     st.subheader("Prepare for Next Investor Meeting")
     prep_investor = st.text_input(
         "Investor Name",
@@ -573,7 +880,7 @@ with tab_prepare:
             fb = _fallback_prepare(memories, display_name)
 
             if memories:
-                st.markdown("### 📅 Investor memory timeline")
+                st.markdown("### Investor memory timeline")
                 _render_timeline_newest_first(memories)
                 st.divider()
 
@@ -587,7 +894,7 @@ with tab_prepare:
             else:
                 _render_prep_cards(ai_response, fb)
 
-with tab_email:
+elif page == "email":
     st.subheader("Generate Investor Follow-up Email")
     email_investor = st.text_input(
         "Investor Name",
@@ -648,11 +955,11 @@ with tab_email:
         gmail_u = gmail_compose_url(subj, body_only)
         mail_u = mailto_url(subj, body_only)
 
-        st.markdown("##### ✉️ Actions")
+        st.markdown("##### Actions")
         ac1, ac2, ac3 = st.columns(3)
         with ac1:
             if st.button(
-                "📋 Copy Email",
+                "Copy email",
                 use_container_width=True,
                 type="primary",
                 key="ff_email_action_copy",
@@ -661,7 +968,7 @@ with tab_email:
                     import pyperclip
 
                     pyperclip.copy(show_draft)
-                    st.toast("Copied to clipboard!", icon="✅")
+                    st.toast("Copied to clipboard.")
                 except ImportError:
                     st.info(
                         "One-click copy needs **`pyperclip`**: run `pip install pyperclip`, "
@@ -670,18 +977,17 @@ with tab_email:
                 except Exception:
                     st.toast(
                         "Could not copy automatically — select the draft with Ctrl+A, Ctrl+C.",
-                        icon="⚠️",
                     )
         with ac2:
             st.link_button(
-                "📧 Open in Gmail",
+                "Open in Gmail",
                 gmail_u,
                 use_container_width=True,
                 help="Opens Gmail compose with subject & body (add recipient).",
             )
         with ac3:
             st.link_button(
-                "✉️ Open in Mail App",
+                "Open in mail app",
                 mail_u,
                 use_container_width=True,
                 help="Opens your default mail client (mailto:).",
@@ -690,15 +996,75 @@ with tab_email:
             "Gmail and Mail use your parsed **Subject** and **body**. Add the **To** field, then send."
         )
 
-st.markdown("---")
-st.caption(
-    "Tip: set `GROQ_API_KEY` and `HINDSIGHT_API_KEY` in `.env` (see `.env.example`). "
-    "Local memory always works for demos."
-)
-st.markdown(
-    "<div style='text-align:center;color:#64748b;font-size:0.92rem;line-height:1.6;padding:10px 0 0 0;'>"
-    "Built for Hindsight Hackathon 🚀<br>"
-    "<span style='opacity:0.9'>FounderFlow AI – Memory Powered Founder OS</span>"
-    "</div>",
-    unsafe_allow_html=True,
-)
+elif page == "chat":
+    st.subheader("Memory chat")
+    st.caption(
+        "Ask anything about saved meetings—e.g. **last three meetings with Rahul**, **what Priya said in her second most recent meeting**, "
+        "open promises, or timelines. Answers use **saved memory only**."
+    )
+    c_clear, c_dummy = st.columns([1, 3])
+    with c_clear:
+        if st.button("Clear chat history", key="ff_chat_clear"):
+            st.session_state.chat_messages = []
+            st.session_state._memory_chat_pending = False
+            st.rerun()
+
+    # Two-step flow: append user + rerun, then answer on next run (reliable with st.chat_input).
+    msgs: List[Dict[str, str]] = st.session_state.chat_messages
+    if st.session_state._memory_chat_pending:
+        if msgs and msgs[-1].get("role") == "user":
+            user_text = str(msgs[-1].get("content", "")).strip()
+            dump = _memory_dump_for_chat()
+            try:
+                with st.spinner("Generating answer from memory…"):
+                    if not memory_store.list_all():
+                        reply = (
+                            "There are **no meetings in memory** yet. Add some under **Add meeting**, "
+                            "or use **Load demo data** in the left sidebar."
+                        )
+                    else:
+                        raw = llm_client.complete(
+                            build_memory_chat_user_prompt(dump, user_text),
+                            temperature=0.35,
+                            system_prompt=MEMORY_CHAT_SYSTEM,
+                        )
+                        reply = (raw or "").strip() or "No response was returned."
+            except Exception as exc:
+                reply = f"Could not complete the request: {exc}"
+            st.session_state.chat_messages.append({"role": "assistant", "content": reply})
+        st.session_state._memory_chat_pending = False
+        st.rerun()
+
+    for msg in st.session_state.chat_messages:
+        role = msg.get("role", "assistant")
+        if role not in ("user", "assistant", "system"):
+            role = "assistant"
+        with st.chat_message(role):
+            st.markdown(str(msg.get("content", "")))
+
+    chat_prompt = st.chat_input(
+        "Ask about investors, last N meetings, or a specific meeting…",
+        key="ff_memory_chat_input",
+    )
+    if chat_prompt:
+        st.session_state.chat_messages.append(
+            {"role": "user", "content": str(chat_prompt).strip()}
+        )
+        st.session_state._memory_chat_pending = True
+        st.rerun()
+
+# st.chat_input must stay the last main-area widget on Memory chat runs; anything
+# rendered after it breaks submit / sticky behavior (Streamlit pins chat to bottom).
+if page != "chat":
+    st.markdown("---")
+    st.caption(
+        "Tip: set `GROQ_API_KEY` in `.env`. For Hindsight, set `HINDSIGHT_API_KEY` and optionally `HINDSIGHT_BASE_URL` "
+        f"(default `{DEFAULT_HINDSIGHT_BASE_URL}`). Local JSON still works without cloud."
+    )
+    st.markdown(
+        "<div class='ff-footer'>"
+        "Built for <strong>Hindsight Hackathon</strong><br>"
+        "<span style='opacity:0.92'>FounderFlow AI — memory-powered founder OS</span>"
+        "</div>",
+        unsafe_allow_html=True,
+    )

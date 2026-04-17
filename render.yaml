@@ -1,0 +1,14 @@
+# https://render.com — New → Blueprint → connect repo, or paste this file.
+services:
+  - type: web
+    name: founderflow
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    region: oregon
+    healthCheckPath: /_stcore/health
+    envVars:
+      - key: GROQ_API_KEY
+        sync: false
+      - key: HINDSIGHT_API_KEY
+        sync: false

@@ -3,7 +3,7 @@ from typing import Optional
 
 import requests
 
-from prompts import SYSTEM_PROMPT
+from prompts import SYSTEM_PROMPT as DEFAULT_SYSTEM_PROMPT
 
 
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
@@ -19,11 +19,18 @@ class GroqClient:
     def configured(self) -> bool:
         return bool(self.api_key)
 
-    def complete(self, user_prompt: str, temperature: float = 0.3) -> str:
+    def complete(
+        self,
+        user_prompt: str,
+        temperature: float = 0.3,
+        system_prompt: Optional[str] = None,
+    ) -> str:
         if not self.configured:
             return (
                 "Groq API key is missing. Add GROQ_API_KEY in your .env file to get AI-generated output."
             )
+
+        sys_msg = system_prompt if system_prompt is not None else DEFAULT_SYSTEM_PROMPT
 
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -32,7 +39,7 @@ class GroqClient:
         payload = {
             "model": self.model,
             "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": sys_msg},
                 {"role": "user", "content": user_prompt},
             ],
             "temperature": temperature,
