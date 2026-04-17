@@ -12,27 +12,57 @@ from dotenv import load_dotenv
 
 
 DEFAULT_MEMORY_FILE = Path("memory_store.json")
-# Hosted Hindsight memories API (override with HINDSIGHT_BASE_URL in .env).
-DEFAULT_HINDSIGHT_BASE_URL = "https://api.hindsight.ai/v1/memories"
+# Hindsight Cloud (Vectorize): https://docs.hindsight.vectorize.io/api-integration
+DEFAULT_HINDSIGHT_HOST = "https://api.hindsight.vectorize.io"
+# Older single-endpoint API (api.hindsight.ai/.../v1/memories) still supported via URL detection.
+# Default memory bank for retain/list/recall (override with HINDSIGHT_BANK_ID).
+DEFAULT_HINDSIGHT_BANK_ID = "founderflow"
+# Back-compat for imports expecting the old name (same host as Vectorize default).
+DEFAULT_HINDSIGHT_BASE_URL = DEFAULT_HINDSIGHT_HOST
 
 # Short-lived cache so Streamlit reruns do not hammer Hindsight on every frame.
 _REMOTE_FETCH_CACHE: Dict[str, Tuple[float, List[Dict]]] = {}
 _REMOTE_TTL_SEC = 45.0
 
 
-def _hindsight_remote_cache_key(api_key: str, base_url: str) -> str:
-    return hashlib.sha256(f"{api_key}|{base_url}".encode("utf-8")).hexdigest()[:32]
+def _hindsight_remote_cache_key(api_key: str, base_url: str, bank_id: str = "") -> str:
+    return hashlib.sha256(
+        f"{api_key}|{base_url}|{bank_id}".encode("utf-8")
+    ).hexdigest()[:32]
 
 
 def invalidate_hindsight_remote_cache() -> None:
     _REMOTE_FETCH_CACHE.clear()
 
 
+def _is_legacy_hindsight_url(url: str) -> bool:
+    u = (url or "").strip().lower()
+    return "api.hindsight.ai" in u or u.rstrip("/").endswith("/v1/memories")
+
+
+def _hindsight_api_origin(url: str) -> str:
+    """Vectorize base URL only (strip accidental /v1/... path)."""
+    u = (url or "").strip().rstrip("/")
+    if not u:
+        return DEFAULT_HINDSIGHT_HOST
+    if "/v1/" in u:
+        return u.split("/v1/")[0].rstrip("/")
+    return u
+
+
 def _extract_memory_items_from_payload(payload: Any) -> List[Dict]:
     if isinstance(payload, list):
         return [x for x in payload if isinstance(x, dict)]
     if isinstance(payload, dict):
-        for key in ("data", "items", "memories", "results", "records"):
+        for key in (
+            "data",
+            "items",
+            "memories",
+            "results",
+            "records",
+            "memory_units",
+            "units",
+        ):
             v = payload.get(key)
             if isinstance(v, list):
                 return [x for x in v if isinstance(x, dict)]
@@ -41,17 +71,21 @@ def _extract_memory_items_from_payload(payload: Any) -> List[Dict]:
 
 def _coerce_hindsight_item_to_record(item: Dict) -> Optional[Dict]:
     """Map a Hindsight list/search row into a FounderFlow meeting dict."""
-    raw_content = item.get("content")
-    if isinstance(raw_content, str) and raw_content.strip():
-        try:
-            obj = json.loads(raw_content)
-            if isinstance(obj, dict) and (
-                (str(obj.get("investor_name") or "")).strip()
-                or (str(obj.get("notes") or "")).strip()
-            ):
-                return _normalize_record(obj)
-        except json.JSONDecodeError:
-            pass
+    for raw_content in (
+        item.get("content"),
+        item.get("text"),
+        item.get("raw_content"),
+    ):
+        if isinstance(raw_content, str) and raw_content.strip():
+            try:
+                obj = json.loads(raw_content)
+                if isinstance(obj, dict) and (
+                    (str(obj.get("investor_name") or "")).strip()
+                    or (str(obj.get("notes") or "")).strip()
+                ):
+                    return _normalize_record(obj)
+            except json.JSONDecodeError:
+                pass
     if (str(item.get("investor_name") or "")).strip() or (str(item.get("notes") or "")).strip():
         return _normalize_record(dict(item))
     return None
@@ -169,15 +203,27 @@ def count_pending_promises(memories: List[Dict]) -> int:
 def check_hindsight_connection(
     api_key: Optional[str],
     base_url: Optional[str] = None,
+    bank_id: Optional[str] = None,
 ) -> bool:
     """True if Hindsight API responds successfully with this key (best-effort)."""
     if not (api_key or "").strip():
         return False
-    url = (base_url or os.getenv("HINDSIGHT_BASE_URL") or "").strip() or DEFAULT_HINDSIGHT_BASE_URL
+    base = (base_url or os.getenv("HINDSIGHT_BASE_URL") or "").strip() or DEFAULT_HINDSIGHT_HOST
+    headers = {"Authorization": f"Bearer {api_key.strip()}"}
     try:
-        headers = {"Authorization": f"Bearer {api_key.strip()}"}
+        if _is_legacy_hindsight_url(base):
+            response = requests.get(
+                base,
+                headers=headers,
+                params={"limit": 1},
+                timeout=6,
+            )
+            return response.status_code in (200, 201)
+        origin = _hindsight_api_origin(base)
+        bid = (bank_id or os.getenv("HINDSIGHT_BANK_ID") or "").strip() or DEFAULT_HINDSIGHT_BANK_ID
+        list_url = f"{origin}/v1/default/banks/{bid}/memories/list"
         response = requests.get(
-            url,
+            list_url,
             headers=headers,
             params={"limit": 1},
             timeout=6,
@@ -214,14 +260,40 @@ class MemoryStore:
         file_path: Path = DEFAULT_MEMORY_FILE,
         hindsight_api_key: Optional[str] = None,
         hindsight_base_url: Optional[str] = None,
+        hindsight_bank_id: Optional[str] = None,
     ) -> None:
         self.file_path = Path(file_path)
         self.hindsight_api_key = hindsight_api_key
         self.hindsight_base_url = (
-            (hindsight_base_url or "").strip() or DEFAULT_HINDSIGHT_BASE_URL
+            (hindsight_base_url or "").strip() or DEFAULT_HINDSIGHT_HOST
         )
+        self.hindsight_bank_id = (
+            (hindsight_bank_id or "").strip() or DEFAULT_HINDSIGHT_BANK_ID
+        )
+        self._legacy_hindsight = _is_legacy_hindsight_url(self.hindsight_base_url)
         self.hindsight_enabled = bool(hindsight_api_key)
         self._ensure_local_store()
+
+    def _vectorize_origin(self) -> str:
+        return _hindsight_api_origin(self.hindsight_base_url)
+
+    def _vectorize_retain_url(self) -> str:
+        return (
+            f"{self._vectorize_origin()}/v1/default/banks/"
+            f"{self.hindsight_bank_id}/memories"
+        )
+
+    def _vectorize_list_url(self) -> str:
+        return (
+            f"{self._vectorize_origin()}/v1/default/banks/"
+            f"{self.hindsight_bank_id}/memories/list"
+        )
+
+    def _vectorize_recall_url(self) -> str:
+        return (
+            f"{self._vectorize_origin()}/v1/default/banks/"
+            f"{self.hindsight_bank_id}/memories/recall"
+        )
 
     def _ensure_local_store(self) -> None:
         if not self.file_path.exists():
@@ -283,12 +355,20 @@ class MemoryStore:
             return []
         try:
             headers = {"Authorization": f"Bearer {self.hindsight_api_key}"}
-            response = requests.get(
-                self.hindsight_base_url,
-                headers=headers,
-                params={"limit": 500},
-                timeout=20,
-            )
+            if self._legacy_hindsight:
+                response = requests.get(
+                    self.hindsight_base_url,
+                    headers=headers,
+                    params={"limit": 500},
+                    timeout=20,
+                )
+            else:
+                response = requests.get(
+                    self._vectorize_list_url(),
+                    headers=headers,
+                    params={"limit": 500},
+                    timeout=20,
+                )
             if response.status_code not in (200, 201):
                 return []
             payload = response.json()
@@ -308,6 +388,7 @@ class MemoryStore:
         ck = _hindsight_remote_cache_key(
             self.hindsight_api_key or "",
             self.hindsight_base_url,
+            self.hindsight_bank_id,
         )
         now = time.monotonic()
         hit = _REMOTE_FETCH_CACHE.get(ck)
@@ -345,17 +426,44 @@ class MemoryStore:
         if not self.hindsight_enabled:
             return False
         try:
-            payload = {
-                "content": json.dumps(record),
-                "metadata": {"investor_name": record.get("investor_name", "")},
+            headers = {
+                "Authorization": f"Bearer {self.hindsight_api_key}",
+                "Content-Type": "application/json",
             }
-            headers = {"Authorization": f"Bearer {self.hindsight_api_key}"}
-            response = requests.post(
-                self.hindsight_base_url,
-                headers=headers,
-                json=payload,
-                timeout=10,
-            )
+            if self._legacy_hindsight:
+                payload = {
+                    "content": json.dumps(record),
+                    "metadata": {"investor_name": record.get("investor_name", "")},
+                }
+                response = requests.post(
+                    self.hindsight_base_url,
+                    headers=headers,
+                    json=payload,
+                    timeout=30,
+                )
+            else:
+                ts = (record.get("created_at") or "").strip() or datetime.now().isoformat(
+                    timespec="seconds"
+                )
+                body = {
+                    "items": [
+                        {
+                            "content": json.dumps(record),
+                            "context": (
+                                f"FounderFlow investor meeting — "
+                                f"{record.get('investor_name', '')}"
+                            ),
+                            "timestamp": ts,
+                        }
+                    ],
+                    "async": False,
+                }
+                response = requests.post(
+                    self._vectorize_retain_url(),
+                    headers=headers,
+                    json=body,
+                    timeout=60,
+                )
             ok = response.status_code in {200, 201, 202}
             if ok:
                 invalidate_hindsight_remote_cache()
@@ -367,16 +475,30 @@ class MemoryStore:
         if not self.hindsight_enabled:
             return []
         try:
-            headers = {"Authorization": f"Bearer {self.hindsight_api_key}"}
-            response = requests.get(
-                self.hindsight_base_url,
-                headers=headers,
-                params={"query": investor_name},
-                timeout=10,
-            )
-            if response.status_code != 200:
-                return []
-            data = response.json()
+            headers = {
+                "Authorization": f"Bearer {self.hindsight_api_key}",
+                "Content-Type": "application/json",
+            }
+            if self._legacy_hindsight:
+                response = requests.get(
+                    self.hindsight_base_url,
+                    headers=headers,
+                    params={"query": investor_name},
+                    timeout=10,
+                )
+                if response.status_code != 200:
+                    return []
+                data = response.json()
+            else:
+                response = requests.post(
+                    self._vectorize_recall_url(),
+                    headers=headers,
+                    json={"query": investor_name, "limit": 50},
+                    timeout=20,
+                )
+                if response.status_code not in (200, 201):
+                    return []
+                data = response.json()
             raw_items = _extract_memory_items_from_payload(data)
             parsed: List[Dict] = []
             for item in raw_items:
@@ -509,7 +631,9 @@ def create_store_from_env() -> MemoryStore:
     load_dotenv()
     api_key = os.getenv("HINDSIGHT_API_KEY", "").strip() or None
     base = os.getenv("HINDSIGHT_BASE_URL", "").strip() or None
+    bank = os.getenv("HINDSIGHT_BANK_ID", "").strip() or None
     return MemoryStore(
         hindsight_api_key=api_key,
         hindsight_base_url=base,
+        hindsight_bank_id=bank,
     )

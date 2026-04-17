@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 
 from llm import GroqClient
 from memory import (
+    DEFAULT_HINDSIGHT_BANK_ID,
     DEFAULT_HINDSIGHT_BASE_URL,
     DEMO_DATA,
     check_hindsight_connection,
@@ -39,7 +40,12 @@ def _streamlit_cloud_secrets_to_env() -> None:
         sec = getattr(st, "secrets", None)
         if sec is None:
             return
-        for k in ("GROQ_API_KEY", "HINDSIGHT_API_KEY", "HINDSIGHT_BASE_URL"):
+        for k in (
+            "GROQ_API_KEY",
+            "HINDSIGHT_API_KEY",
+            "HINDSIGHT_BASE_URL",
+            "HINDSIGHT_BANK_ID",
+        ):
             try:
                 if k not in sec:
                     continue
@@ -117,8 +123,14 @@ if "ff_dashboard_flash" not in st.session_state:
 
 
 @st.cache_data(ttl=90)
-def _cached_hindsight_live(api_key: str, base_url: str) -> bool:
-    return check_hindsight_connection(api_key, base_url)
+def _cached_hindsight_live(api_key: str, base_url: str, bank_id: str) -> bool:
+    return check_hindsight_connection(api_key, base_url, bank_id)
+
+
+def _hindsight_env_bank_id() -> str:
+    return (
+        os.getenv("HINDSIGHT_BANK_ID", "").strip() or DEFAULT_HINDSIGHT_BANK_ID
+    )
 
 
 def _hindsight_status_label(*, compact: bool = False) -> str:
@@ -126,7 +138,8 @@ def _hindsight_status_label(*, compact: bool = False) -> str:
     if not key:
         return "Local" if compact else "Local only"
     base = os.getenv("HINDSIGHT_BASE_URL", "").strip() or DEFAULT_HINDSIGHT_BASE_URL
-    ok = _cached_hindsight_live(key, base)
+    bid = _hindsight_env_bank_id()
+    ok = _cached_hindsight_live(key, base, bid)
     if compact:
         return "OK" if ok else "Offline"
     return "Hindsight live" if ok else "Hindsight unreachable"
@@ -137,9 +150,16 @@ def _hindsight_metric_help() -> str:
     if not key:
         return "No HINDSIGHT_API_KEY — data stays in memory_store.json only."
     base = os.getenv("HINDSIGHT_BASE_URL", "").strip() or DEFAULT_HINDSIGHT_BASE_URL
-    if _cached_hindsight_live(key, base):
-        return f"API reachable at {base} — saves sync to cloud; lists merge remote rows."
-    return f"Key set but API check failed — verify key, URL ({base}), and network."
+    bid = _hindsight_env_bank_id()
+    if _cached_hindsight_live(key, base, bid):
+        return (
+            f"Hindsight Cloud API OK — host {base}, bank `{bid}`. "
+            "Saves use retain; lists/recall merge into the app."
+        )
+    return (
+        f"Key set but API check failed — verify key, host ({base}), "
+        f"bank id (`{bid}`), and network."
+    )
 
 
 def _parse_record_instant(created_at: Optional[str], meeting_date: Optional[str]) -> datetime:
@@ -626,14 +646,19 @@ with st.sidebar:
             else:
                 st.session_state.ff_dashboard_flash = ("info", detail)
             st.rerun()
-        with st.expander("Hindsight endpoint"):
+        with st.expander("Hindsight Cloud (Vectorize)"):
+            hs_bank = _hindsight_env_bank_id()
             st.markdown(
-                f"Requests use **`{hs_base}`** with your API key. "
-                "Override the URL with **`HINDSIGHT_BASE_URL`** in `.env` if your project uses a different host."
+                f"Default API host is **[Hindsight Cloud](https://docs.hindsight.vectorize.io/api-integration)** "
+                f"at **`{hs_base}`**. Memories use bank **`{hs_bank}`** "
+                f"(set **`HINDSIGHT_BANK_ID`** to change). "
+                "Saves call **retain** (`POST .../banks/{{bank}}/memories`); "
+                "lists use **list**; investor search uses **recall**."
             )
     else:
         st.caption(
-            "Add **`HINDSIGHT_API_KEY`** (and optional **`HINDSIGHT_BASE_URL`**) in `.env`, then restart, to sync with Hindsight."
+            "Add **`HINDSIGHT_API_KEY`** in `.env` or Streamlit secrets. "
+            "Optional: **`HINDSIGHT_BASE_URL`** (default Vectorize host), **`HINDSIGHT_BANK_ID`** (default `founderflow`)."
         )
 
 _consume_dashboard_flash()
@@ -1058,8 +1083,9 @@ elif page == "chat":
 if page != "chat":
     st.markdown("---")
     st.caption(
-        "Tip: set `GROQ_API_KEY` in `.env`. For Hindsight, set `HINDSIGHT_API_KEY` and optionally `HINDSIGHT_BASE_URL` "
-        f"(default `{DEFAULT_HINDSIGHT_BASE_URL}`). Local JSON still works without cloud."
+        "Tip: set `GROQ_API_KEY` in `.env` or secrets. For Hindsight Cloud, set `HINDSIGHT_API_KEY` and optionally "
+        f"`HINDSIGHT_BASE_URL` (default `{DEFAULT_HINDSIGHT_BASE_URL}`) and `HINDSIGHT_BANK_ID` (default `founderflow`). "
+        "Local JSON still works without cloud."
     )
     st.markdown(
         "<div class='ff-footer'>"

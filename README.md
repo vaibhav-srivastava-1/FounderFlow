@@ -56,16 +56,19 @@ pip install -r requirements.txt
 ```env
 GROQ_API_KEY=your_groq_key
 HINDSIGHT_API_KEY=your_hindsight_key
-# Optional — only if your project uses a non-default API host:
-# HINDSIGHT_BASE_URL=https://api.hindsight.ai/v1/memories
+# Default host is Hindsight Cloud (Vectorize). Optional overrides:
+# HINDSIGHT_BASE_URL=https://api.hindsight.vectorize.io
+# HINDSIGHT_BANK_ID=founderflow
 ```
 
-### Hindsight
+### Hindsight (Hindsight Cloud / Vectorize)
 
-1. Put **`HINDSIGHT_API_KEY`** in `.env` (same folder as `app.py`) and restart Streamlit.
-2. **Save Memory** continues to write `memory_store.json` locally and **POSTs** the same row to Hindsight (`content` = JSON, `metadata.investor_name`).
-3. **Overview**, **Memory chat**, and investor flows **merge** Hindsight rows with local rows (deduped, ~45s cache). Use sidebar **Pull Hindsight → local file** to append cloud-only rows into `memory_store.json` for offline backup.
-4. If your hackathon uses another base URL, set **`HINDSIGHT_BASE_URL`** to that full memories endpoint.
+The default API host is **[`https://api.hindsight.vectorize.io`](https://docs.hindsight.vectorize.io/api-integration)** (see [API integration](https://docs.hindsight.vectorize.io/api-integration)). The app uses your **[memory bank](https://hindsight.vectorize.io/developer/api/memory-banks)** id (**`HINDSIGHT_BANK_ID`**, default `founderflow`) for **retain** (save), **list** (merge into Overview/chat), and **recall** (investor search).
+
+1. Put **`HINDSIGHT_API_KEY`** in `.env` (or Streamlit **Secrets** online) and restart.
+2. **Save Memory** writes `memory_store.json` locally and **retains** the meeting JSON in your bank (`POST .../v1/default/banks/{bank_id}/memories`).
+3. **Overview**, **Memory chat**, and investor flows **merge** listed cloud rows with local rows (deduped, ~45s cache). Sidebar **Pull Hindsight → local file** appends cloud-only rows into `memory_store.json`.
+4. Legacy **`https://api.hindsight.ai/v1/memories`** is still supported if you set **`HINDSIGHT_BASE_URL`** to that exact style of URL.
 
 5. Run locally:
 
@@ -87,7 +90,8 @@ Repo root must contain **`app.py`**, **`requirements.txt`**, and **`.streamlit/c
    ```toml
    GROQ_API_KEY = "your_groq_key"
    HINDSIGHT_API_KEY = "your_hindsight_key"
-   # HINDSIGHT_BASE_URL = "https://api.hindsight.ai/v1/memories"
+   # HINDSIGHT_BASE_URL = "https://api.hindsight.vectorize.io"
+   # HINDSIGHT_BANK_ID = "founderflow"
    ```
 
    The app copies these into the process environment on startup.
@@ -98,7 +102,7 @@ Repo root must contain **`app.py`**, **`requirements.txt`**, and **`.streamlit/c
 
 1. Use the included **`Dockerfile`** (listens on **8501**, binds **0.0.0.0**).
 2. Create a **Web** service, choose **Docker**, root = this folder.
-3. Set environment variables: **`GROQ_API_KEY`**, **`HINDSIGHT_API_KEY`**, and optionally **`HINDSIGHT_BASE_URL`**.
+3. Set environment variables: **`GROQ_API_KEY`**, **`HINDSIGHT_API_KEY`**, and optionally **`HINDSIGHT_BASE_URL`** / **`HINDSIGHT_BANK_ID`**.
 4. Optional: import **`render.yaml`** on Render as a blueprint.
 
 ## Demo Data
