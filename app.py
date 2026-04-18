@@ -1,5 +1,4 @@
 import html
-import os
 import re
 import urllib.parse
 from collections import defaultdict
@@ -11,10 +10,7 @@ from dotenv import load_dotenv
 
 from llm import GroqClient
 from memory import (
-    DEFAULT_HINDSIGHT_BANK_ID,
-    DEFAULT_HINDSIGHT_BASE_URL,
     DEMO_DATA,
-    check_hindsight_connection,
     count_pending_promises,
     create_store_from_env,
     memories_to_text,
@@ -33,31 +29,26 @@ from theme_css import DARK_PRO_THEME_CSS as FF_GLOBAL_CSS, FF_GOOGLE_FONTS
 
 load_dotenv()
 
-
-def _streamlit_cloud_secrets_to_env() -> None:
-    """Streamlit Community Cloud / Docker: map st.secrets into os.environ for Groq + Hindsight."""
-    try:
-        sec = getattr(st, "secrets", None)
-        if sec is None:
-            return
-        for k in (
-            "GROQ_API_KEY",
-            "HINDSIGHT_API_KEY",
-            "HINDSIGHT_BASE_URL",
-            "HINDSIGHT_BANK_ID",
-        ):
-            try:
-                if k not in sec:
-                    continue
-                if (os.environ.get(k) or "").strip():
-                    continue
-                val = str(sec[k]).strip()
-                if val:
-                    os.environ[k] = val
-            except Exception:
-                continue
-    except Exception:
-        pass
+# --- Optional: Streamlit Community Cloud / Docker deploy ---
+# Uncomment to map st.secrets into os.environ (e.g. GROQ_API_KEY) when deployed online.
+# def _streamlit_cloud_secrets_to_env() -> None:
+#     try:
+#         sec = getattr(st, "secrets", None)
+#         if sec is None:
+#             return
+#         for k in ("GROQ_API_KEY",):
+#             try:
+#                 if k not in sec:
+#                     continue
+#                 if (os.environ.get(k) or "").strip():
+#                     continue
+#                 val = str(sec[k]).strip()
+#                 if val:
+#                     os.environ[k] = val
+#             except Exception:
+#                 continue
+#     except Exception:
+#         pass
 
 
 st.set_page_config(
@@ -67,7 +58,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-_streamlit_cloud_secrets_to_env()
+# _streamlit_cloud_secrets_to_env()
 
 memory_store = create_store_from_env()
 llm_client = GroqClient()
@@ -120,46 +111,6 @@ if "ff_nav_page" not in st.session_state:
     st.session_state.ff_nav_page = "overview"
 if "ff_dashboard_flash" not in st.session_state:
     st.session_state.ff_dashboard_flash = None
-
-
-@st.cache_data(ttl=90)
-def _cached_hindsight_live(api_key: str, base_url: str, bank_id: str) -> bool:
-    return check_hindsight_connection(api_key, base_url, bank_id)
-
-
-def _hindsight_env_bank_id() -> str:
-    return (
-        os.getenv("HINDSIGHT_BANK_ID", "").strip() or DEFAULT_HINDSIGHT_BANK_ID
-    )
-
-
-def _hindsight_status_label(*, compact: bool = False) -> str:
-    key = os.getenv("HINDSIGHT_API_KEY", "").strip()
-    if not key:
-        return "Local" if compact else "Local only"
-    base = os.getenv("HINDSIGHT_BASE_URL", "").strip() or DEFAULT_HINDSIGHT_BASE_URL
-    bid = _hindsight_env_bank_id()
-    ok = _cached_hindsight_live(key, base, bid)
-    if compact:
-        return "OK" if ok else "Offline"
-    return "Hindsight live" if ok else "Hindsight unreachable"
-
-
-def _hindsight_metric_help() -> str:
-    key = os.getenv("HINDSIGHT_API_KEY", "").strip()
-    if not key:
-        return "No HINDSIGHT_API_KEY — data stays in memory_store.json only."
-    base = os.getenv("HINDSIGHT_BASE_URL", "").strip() or DEFAULT_HINDSIGHT_BASE_URL
-    bid = _hindsight_env_bank_id()
-    if _cached_hindsight_live(key, base, bid):
-        return (
-            f"Hindsight Cloud API OK — host {base}, bank `{bid}`. "
-            "Saves use retain; lists/recall merge into the app."
-        )
-    return (
-        f"Key set but API check failed — verify key, host ({base}), "
-        f"bank id (`{bid}`), and network."
-    )
 
 
 def _parse_record_instant(created_at: Optional[str], meeting_date: Optional[str]) -> datetime:
@@ -596,18 +547,8 @@ with st.sidebar:
         else:
             st.session_state.ff_dashboard_flash = (
                 "info",
-                "All demo rows are already in memory. Use Add meeting → Load next sample into form, or Reset demo store for a clean canonical set.",
+                "All demo rows are already in memory. Use Add meeting → Load next sample into form, or Run judge demo to reload the canonical demo set.",
             )
-        st.rerun()
-    if st.button("Reset demo store", use_container_width=True):
-        memory_store.replace_all(DEMO_DATA)
-        st.session_state.email_draft = ""
-        st.session_state.demo_fill_idx = 0
-        st.session_state.clear_add_form_after_save = True
-        st.session_state.ff_dashboard_flash = (
-            "success",
-            f"Store reset to {len(DEMO_DATA)} demo rows. Add meeting form clears on next visit to that page.",
-        )
         st.rerun()
     if st.button("Clear all memories", use_container_width=True):
         memory_store.clear_all()
@@ -624,42 +565,6 @@ with st.sidebar:
     ):
         st.session_state.show_memory_compare = not st.session_state.show_memory_compare
         st.rerun()
-
-    st.divider()
-    st.caption("Hindsight cloud")
-    hs_key = os.getenv("HINDSIGHT_API_KEY", "").strip()
-    hs_base = os.getenv("HINDSIGHT_BASE_URL", "").strip() or DEFAULT_HINDSIGHT_BASE_URL
-    if hs_key:
-        st.caption("Saves push to Hindsight; Overview & chat merge cloud rows in memory.")
-        if st.button(
-            "Pull Hindsight → local file",
-            key="ff_hs_merge",
-            use_container_width=True,
-            help="GET up to 500 memories from the API and append rows missing from memory_store.json.",
-        ):
-            added, detail = memory_store.merge_hindsight_into_local()
-            if added > 0:
-                st.session_state.ff_dashboard_flash = (
-                    "success",
-                    f"Merged {added} meeting row(s) from Hindsight into your local JSON.",
-                )
-            else:
-                st.session_state.ff_dashboard_flash = ("info", detail)
-            st.rerun()
-        with st.expander("Hindsight Cloud (Vectorize)"):
-            hs_bank = _hindsight_env_bank_id()
-            st.markdown(
-                f"Default API host is **[Hindsight Cloud](https://docs.hindsight.vectorize.io/api-integration)** "
-                f"at **`{hs_base}`**. Memories use bank **`{hs_bank}`** "
-                f"(set **`HINDSIGHT_BANK_ID`** to change). "
-                "Saves call **retain** (`POST .../banks/{{bank}}/memories`); "
-                "lists use **list**; investor search uses **recall**."
-            )
-    else:
-        st.caption(
-            "Add **`HINDSIGHT_API_KEY`** in `.env` or Streamlit secrets. "
-            "Optional: **`HINDSIGHT_BASE_URL`** (default Vectorize host), **`HINDSIGHT_BANK_ID`** (default `founderflow`)."
-        )
 
 _consume_dashboard_flash()
 
@@ -683,23 +588,20 @@ if page == "overview":
         st.metric("Open promise items", pending_n)
     with d4:
         st.metric(
-            "Hindsight",
-            _hindsight_status_label(compact=True),
-            help=_hindsight_metric_help(),
+            "Memory file",
+            "Local",
+            help=f"Meetings are saved to `{memory_store.file_path}` on disk.",
         )
 
     st.caption(
         "Memory off / on (left sidebar): compare generic LLM output vs FounderFlow using your current store. "
-        "Reset demo store replaces the file with exactly "
-        f"{len(DEMO_DATA)} rows—if totals grow right after reset, it is usually an extra Save from Add meeting."
+        f"Run judge demo loads exactly {len(DEMO_DATA)} canonical demo rows; totals can grow if you save additional meetings."
     )
 
     if st.session_state.show_memory_compare:
         n_store = len(all_memories)
-        hs_label = _hindsight_status_label()
         store_status = (
-            f"**Right now:** {n_store} row(s) in the local store. "
-            f"Hindsight / cloud sync: **{hs_label}** (keys in `.env`). "
+            f"**Right now:** {n_store} row(s) in `{memory_store.file_path}`. "
             "While rows exist, **memory is on** for this session."
             if n_store
             else "**Right now:** the store is **empty**—load demo data or add a meeting so **memory on** uses real rows."
@@ -736,7 +638,7 @@ if page == "overview":
 **User experience**
 
 - One place to log what was said; prep and outbound stay aligned with that history.
-- Optional **Hindsight** upload when configured—local JSON always works as the source of truth on disk.
+- **Local JSON** on disk is the source of truth for this app.
                 """.strip(),
             )
 
@@ -776,7 +678,7 @@ if page == "overview":
             """
 **Without chat memory:** each LLM session forgets your investors and promises.
 
-**With FounderFlow:** notes, objections, and tasks stay in **durable memory** (local + Hindsight when connected)—prep and email pull the **same** relationship context every time.
+**With FounderFlow:** notes, objections, and tasks stay in **durable memory** on disk—prep and email pull the **same** relationship context every time.
             """
         )
 
@@ -877,8 +779,7 @@ elif page == "add":
             else:
                 st.session_state.clear_add_form_after_save = True
                 st.session_state.save_meeting_flash = (
-                    f"Memory saved ({after_count} total). "
-                    f"Hindsight: {'ok' if result['hindsight_saved'] else 'local only'}."
+                    f"Memory saved ({after_count} total) to `{memory_store.file_path}`."
                 )
             st.rerun()
 
@@ -1083,13 +984,10 @@ elif page == "chat":
 if page != "chat":
     st.markdown("---")
     st.caption(
-        "Tip: set `GROQ_API_KEY` in `.env` or secrets. For Hindsight Cloud, set `HINDSIGHT_API_KEY` and optionally "
-        f"`HINDSIGHT_BASE_URL` (default `{DEFAULT_HINDSIGHT_BASE_URL}`) and `HINDSIGHT_BANK_ID` (default `founderflow`). "
-        "Local JSON still works without cloud."
+        "Tip: set `GROQ_API_KEY` in `.env` for AI features. Meeting data is stored locally in `memory_store.json`."
     )
     st.markdown(
         "<div class='ff-footer'>"
-        "Built for <strong>Hindsight Hackathon</strong><br>"
         "<span style='opacity:0.92'>FounderFlow AI — memory-powered founder OS</span>"
         "</div>",
         unsafe_allow_html=True,
